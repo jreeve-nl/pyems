@@ -1694,6 +1694,443 @@ class MicrostripCoupler(Structure):
         )
 
 
+class MicrostripRadialStub(Structure):
+    """
+    Trace consisting of a sector of a circle having a specified
+    radius at the start and the end with internal angle alpha.
+    Used when a low impedance stub is required that has a more 
+    well-defined 'entry' point with respect to the line it is fed 
+    from, and/or, when a quarter-wave section of line is required 
+    to behave quarter-wave-like over a broader range of frequency.
+
+    The radial stub proceeds in the positive y-direction, where
+    ri is the radius at the lower y-value and ro is the radius
+    at the higher y-value.  A sector with internal angle alpha
+    is swept out and a straight line at y=ri * sin(alpha) closes
+    the polygon.  It observes both a rotation and an additional 
+    transformation.
+    """
+
+    unique_index = 0
+
+    def __init__(
+        self,
+        pcb: PCB,
+        position: C2TupleOp,
+        ri: float,
+        ro: float,
+        alpha: float,
+        rotation: float = 0,
+        trace_layer: int = 0,
+        gnd_layer: int = 1,
+        gap: float = None,
+        transform: CSTransform = None,
+    ):
+        """
+        :param pcb: PCB object to which the radial stub is added.
+        :param position: Radial stub midpoint.  If set to None, the stub
+            will need to be constructed later manually with construct.
+        :param ri: Inner radius.
+        :param ro: Outer radius.
+        :param alpha: Sector internal angle.
+        :param rotation: Rotation about the normal axis.  A positive
+            value performs a rotation in the counterclockwise
+            direction whereas a negative value performs a rotation in
+            the clockwise direction.  This performs a rotation without
+            suffering the floating point precision affects of general
+            transformations in OpenEMS (see the documentation).
+        :param trace_layer: PCB copper layer on which the stub should
+            be placed.
+        :param gnd_layer: PCB copper layer of the reference ground
+            plane.
+        :param gap: Distance between taper and surrounding coplanar
+            ground plane.  If gap is set to None, no gap is used.
+            Ensure coplanar copper pour is removed if this is used.
+        :param transform: Transform applied to radial stub.
+        """
+        self._pcb = pcb
+        self._position = c2_maybe_tuple(position)
+        tr = CSTransform()
+        tr.AddTransform("RotateAxis", "z", rotation)
+        self._ri = ri
+        self._ro = ro
+        self._alpha = alpha
+
+        self._width = 2 * ri * np.sin(np.pi / 180 * alpha / 2)
+        self._length = np.sqrt(self._ri ** 2 - (self._width / 2) ** 2)
+        self._n_points = 53  # arbitrarily chosen,
+                             # increase for smoother radial path
+
+        self._rotation = tr
+        self._trace_layer = trace_layer
+        self._gnd_layer = gnd_layer
+        self._gap = gap
+        self._transform = transform
+
+        if self.position is not None:
+            self.construct(self.position)
+
+    @property
+    def pcb(self) -> PCB:
+        """
+        """
+        return self._pcb
+
+    @property
+    def position(self) -> Coordinate2:
+        """
+        """
+        return self._position
+
+    @property
+    def transform(self) -> CSTransform:
+        """
+        """
+        return self._transform
+
+    @property
+    def width(self) -> float:
+        """ extent of stub in x-direction at start of stub
+        """
+        return self._width
+
+    @property
+    def length(self) -> float:
+        """ distance from circle center to start of stub in y-direction
+        """
+        return self._length
+
+    @property
+    def ri(self) -> float:
+        """
+        """
+        return self._ri
+
+    @property
+    def ro(self) -> float:
+        """
+        """
+        return self._ro
+
+    @property
+    def alpha(self) -> float:
+        """
+        """
+        return self._alpha
+
+    def construct(
+        self, position: C2Tuple, transform: CSTransform = None
+    ) -> None:
+        """
+        """
+        self._transform = append_transform(self.transform, transform)
+        self._position = c2_maybe_tuple(position)
+        self._construct_radial_stub()
+        self._construct_gap()
+
+    def _construct_radial_stub(self) -> None:
+        """
+        """
+        radial_stub_prop = add_conducting_sheet(
+            csx=self.pcb.sim.csx,
+            name=self._radial_stub_name(),
+            conductivity=self.pcb.pcb_prop.metal_conductivity(),
+            thickness=self.pcb.pcb_prop.copper_thickness(self._trace_layer),
+        )
+        pts = self._radial_stub_points(self.ri, self.ro, self.alpha)
+        zpos = self._radial_stub_elevation()
+        construct_polygon(
+            prop=radial_stub_prop,
+            points=pts,
+            normal=Axis("z"),
+            elevation=zpos,
+            priority=priorities["trace"],
+            transform=self.transform,
+        )
+
+    def _construct_gap(self) -> None:
+        """
+        """
+        if self._gap is None:
+            return
+
+        ref_freq = self.pcb.sim.reference_frequency
+        gap_prop = add_material(
+            csx=self.pcb.sim.csx,
+            name=self._gap_name(),
+            epsilon=self.pcb.pcb_prop.substrate.epsr_at_freq(ref_freq),
+            kappa=self.pcb.pcb_prop.substrate.kappa_at_freq(ref_freq),
+            color=colors["soldermask"],
+        )
+        pts = self._radial_stub_points(
+            self.width1 + (2 * self._gap), self.width2 + (2 * self._gap)
+        )
+        zpos = self._radial_stub_elevation()
+        construct_polygon(
+            prop=gap_prop,
+            points=pts,
+            normal=Axis("z"),
+            elevation=zpos,
+            priority=priorities["keepout"],
+            transform=self.transform,
+        )
+
+    def _radial_stub_points(
+        self, ri: float, ro: float, alpha: float
+    ) -> List[Coordinate2]:
+        """
+        Returns n polygon points in the order bottom left, bottom right
+        , and so on clockwise.
+        """
+        n_seg = self._n_points - 5  # -4 fixed vertices -1 number -> index
+        delta_alpha = np.longdouble(self._alpha) / np.longdouble(n_seg)
+        beta = np.longdouble((self._n_points - 2) / 2) * delta_alpha + delta_alpha
+        
+        pts = [
+            Coordinate2(-self._width / 2, 0),
+            Coordinate2(self._width / 2, 0),
+            Coordinate2(ro * np.sin(np.pi / 180 * self._alpha / 2),
+                        ro * np.cos(np.pi / 180 * self._alpha / 2))
+        ]
+
+        for i in range(3, self._n_points - 1):
+            pts.append(Coordinate2(ro * np.sin(np.pi / 180 * beta),
+                                   ro * np.cos(np.pi / 180 * beta)))
+            beta -= delta_alpha
+
+        pts.append(Coordinate2(-ro * np.sin(np.pi / 180 * self._alpha / 2),
+                               ro * np.cos(np.pi / 180 * self._alpha / 2)))
+
+        pts = [pt.transform(self._rotation) for pt in pts]
+        for pt in pts:
+            pt.x += self.position.x
+            pt.y += self.position.y
+
+        return pts
+
+    def _radial_stub_name(self) -> str:
+        """
+        """
+        return "radial_stub_" + str(self._get_ctr())
+
+    def _gap_name(self) -> str:
+        """
+        """
+        return "radial_stub_" + str(self._get_ctr()) + "_gap"
+
+    def _radial_stub_elevation(self) -> float:
+        """
+        """
+        return self.pcb.copper_layer_elevation(self._trace_layer)
+
+
+class MicrostripTee(Structure):
+    """
+    Trace forming a microstrip tee structure with specific widths 
+    at each of the three ports.
+
+    The tee proceeds in the positive x-direction, where width1 is
+    the width at the lower x-value (port 1) and width2 is the width
+    at the higher x-value (port 2).  By default Port 3 with associated
+    width3 extends in the negative y-direction.  This can be adjusted
+    with a transformation.
+    """
+
+    unique_index = 0
+
+    def __init__(
+        self,
+        pcb: PCB,
+        position: C2TupleOp,
+        width1: float,
+        width2: float,
+        width3: float,
+        rotation: float = 0,
+        trace_layer: int = 0,
+        gnd_layer: int = 1,
+        gap: float = None,
+        transform: CSTransform = None,
+    ):
+        """
+        :param pcb: PCB object to which the taper is added.
+        :param position: Tee midpoint.  If set to None, the taper
+            will need to be constructed later manually with construct.
+        :param width1: Leftmost width.
+        :param width2: Rightmost width.
+        :param width3: Downmost width.
+        :param rotation: Rotation about the normal axis.  A positive
+            value performs a rotation in the counterclockwise
+            direction whereas a negative value performs a rotation in
+            the clockwise direction.  This performs a rotation without
+            suffering the floating point precision affects of general
+            transformations in OpenEMS (see the documentation).
+        :param trace_layer: PCB copper layer on which the tee should
+            be placed.
+        :param gnd_layer: PCB copper layer of the reference ground
+            plane.
+        :param gap: Distance between tee and surrounding coplanar
+            ground plane.  If gap is set to None, no gap is used.
+            Ensure coplanar copper pour is removed if this is used.
+        :param transform: Transform applied to tee.
+        """
+        self._pcb = pcb
+        self._position = c2_maybe_tuple(position)
+        tr = CSTransform()
+        tr.AddTransform("RotateAxis", "z", rotation)
+        self._rotation = tr
+        self._trace_layer = trace_layer
+        self._gnd_layer = gnd_layer
+        self._width1 = width1
+        self._width2 = width2
+        self._width3 = width3
+        self._gap = gap
+        self._transform = transform
+        self._index = None
+        if self.position is not None:
+            self.construct(self.position)
+
+    @property
+    def pcb(self) -> PCB:
+        """
+        """
+        return self._pcb
+
+    @property
+    def position(self) -> Coordinate2:
+        """
+        """
+        return self._position
+
+    @property
+    def transform(self) -> CSTransform:
+        """
+        """
+        return self._transform
+
+    @property
+    def width1(self) -> float:
+        """
+        """
+        return self._width1
+
+    @property
+    def width2(self) -> float:
+        """
+        """
+        return self._width2
+
+    @property
+    def width3(self) -> float:
+        """
+        """
+        return self._width3
+
+    def construct(
+        self, position: C2Tuple, transform: CSTransform = None
+    ) -> None:
+        """
+        """
+        self._transform = append_transform(self.transform, transform)
+        self._position = c2_maybe_tuple(position)
+        self._index = self._get_inc_ctr()
+        self._construct_tee()
+        self._construct_gap()
+
+    def _construct_tee(self) -> None:
+        """
+        """
+        print(self._tee_name())
+        tee_prop = add_conducting_sheet(
+            csx=self.pcb.sim.csx,
+            name=self._tee_name(),
+            conductivity=self.pcb.pcb_prop.metal_conductivity(),
+            thickness=self.pcb.pcb_prop.copper_thickness(self._trace_layer),
+        )
+        pts = self._tee_points(self.width1, self.width2, self.width3)
+        zpos = self._tee_elevation()
+        construct_polygon(
+            prop=tee_prop,
+            points=pts,
+            normal=Axis("z"),
+            elevation=zpos,
+            priority=priorities["trace"],
+            transform=self.transform,
+        )
+
+    def _construct_gap(self) -> None:
+        """
+        """
+        if self._gap is None:
+            return
+
+        ref_freq = self.pcb.sim.reference_frequency
+        gap_prop = add_material(
+            csx=self.pcb.sim.csx,
+            name=self._gap_name(),
+            epsilon=self.pcb.pcb_prop.substrate.epsr_at_freq(ref_freq),
+            kappa=self.pcb.pcb_prop.substrate.kappa_at_freq(ref_freq),
+            color=colors["soldermask"],
+        )
+        pts = self._tee_points(
+            self.width1 + (2 * self._gap), self.width2 + (2 * self._gap)
+        )
+        zpos = self._tee_elevation()
+        construct_polygon(
+            prop=gap_prop,
+            points=pts,
+            normal=Axis("z"),
+            elevation=zpos,
+            priority=priorities["keepout"],
+            transform=self.transform,
+        )
+
+    def _tee_points(
+        self, width1: float, width2: float, width3: float
+    ) -> List[Coordinate2]:
+        """
+        Returns 6 tee corners in the order p3 left bottom, p3 right bottom
+        , p2 top right, p2 top middle, p1 top middle, p1 top left.
+        """
+
+        wlong = (width2, width1) [width1 > width2]
+
+        xmin = -width3 / 2
+        xmax = width3 / 2
+        ymin = -wlong / 2
+        yl1 = width1 / 2
+        yr1 = width2 / 2
+
+        pts = [
+            Coordinate2(xmin, ymin),
+            Coordinate2(xmax, ymin),
+            Coordinate2(xmax, yr1),
+            Coordinate2(0, yr1),
+            Coordinate2(0, yl1),
+            Coordinate2(xmin, yl1)
+        ]
+        pts = [pt.transform(self._rotation) for pt in pts]
+        for pt in pts:
+            pt.x += self.position.x
+            pt.y += self.position.y
+
+        return pts
+
+    def _tee_name(self) -> str:
+        """
+        """
+        return "tee_" + str(self._get_ctr())
+
+    def _gap_name(self) -> str:
+        """
+        """
+        return "tee_" + str(self._get_ctr()) + "_gap"
+
+    def _tee_elevation(self) -> float:
+        """
+        """
+        return self.pcb.copper_layer_elevation(self._trace_layer)
+
+
 class Taper(Structure):
     """
     Trace with different widths at the start and end.  Can be used to
