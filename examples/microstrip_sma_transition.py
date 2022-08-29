@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+# This example requires a patched version of CSXCAD. The PR
+# implementing the intended behavior is available at
+# https://github.com/thliebig/CSXCAD/pull/15.
+
+import os
+import sys
 import numpy as np
 from pyems.pcb import common_pcbs
 from pyems.structure import Microstrip, PCB, Coax, priorities
@@ -223,6 +229,9 @@ mesh = Mesh(
 
 box = mesh.sim_box(include_pml=False)
 field = FieldDump(sim=sim, box=box, dump_type=DumpType.efield_time)
+
+if os.getenv("_PYEMS_PYTEST"):
+    sys.exit(0)
 
 sim.run()
 sim.view_field()

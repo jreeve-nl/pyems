@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import os
+import sys
 import numpy as np
 from CSXCAD.CSTransform import CSTransform
 from pyems.pcb import common_pcbs
@@ -37,7 +39,6 @@ Microstrip(
     width=trace_width,
     propagation_axis=Axis("x"),
     gnd_gap=(gap, gap),
-    via_gap=(via_gap, via_gap),
     port_number=1,
     excite=True,
     ref_impedance=50,
@@ -67,7 +68,6 @@ Microstrip(
     width=trace_width,
     propagation_axis=Axis("x", direction=-1),
     gnd_gap=(gap, gap),
-    via_gap=(via_gap, via_gap),
     port_number=2,
     excite=False,
     ref_impedance=50,
@@ -77,7 +77,7 @@ Mesh(
     sim=sim,
     metal_res=1 / 80,
     nonmetal_res=1 / 40,
-    smooth=[1.1, 1.5, 1.5],
+    smooth=(1.1, 1.5, 1.5),
     min_lines=9,
     expand_bounds=((0, 0), (8, 8), (8, 8)),
 )
@@ -90,6 +90,9 @@ FieldDump(
     ),
     dump_type=DumpType.current_density_time,
 )
+
+if os.getenv("_PYEMS_PYTEST"):
+    sys.exit(0)
 
 sim.run()
 sim.view_field()
